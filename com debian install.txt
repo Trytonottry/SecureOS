@@ -1,0 +1,119 @@
+# Secure OS: ISO Build Script
+
+# This script is used to create a custom Debian-based ISO with Secure OS features.
+# It prepares a live system that includes both a portable mode and a full installation option.
+
+#!/bin/bash
+
+# Exit script on error
+set -e
+
+# Variables
+BUILD_DIR="secure-os-build"
+LIVE_DIR="$BUILD_DIR/live"
+CHROOT_DIR="$BUILD_DIR/chroot"
+ISO_OUTPUT="SecureOS.iso"
+
+# Ensure required tools are installed
+function install_dependencies() {
+    echo "Installing dependencies..."
+    sudo apt-get update
+    sudo apt-get install -y live-build debootstrap squashfs-tools xorriso grub-pc-bin grub-efi-amd64-bin
+}
+
+# Create build environment
+function prepare_environment() {
+    echo "Preparing build environment..."
+    sudo rm -rf "$BUILD_DIR"
+    mkdir -p "$LIVE_DIR" "$CHROOT_DIR"
+}
+
+# Bootstrap Debian base system
+function bootstrap_debian() {
+    echo "Bootstrapping Debian system..."
+    sudo debootstrap --arch=amd64 stable "$CHROOT_DIR" http://deb.debian.org/debian/
+}
+
+# Configure the chroot environment
+function configure_chroot() {
+    echo "Configuring chroot environment..."
+
+    # Copy required files into chroot
+    sudo cp /etc/apt/sources.list "$CHROOT_DIR/etc/apt/sources.list"
+
+    # Bind system directories for access
+    sudo mount --bind /dev "$CHROOT_DIR/dev"
+    sudo mount --bind /proc "$CHROOT_DIR/proc"
+    sudo mount --bind /sys "$CHROOT_DIR/sys"
+
+    # Install packages
+    sudo chroot "$CHROOT_DIR" /bin/bash -c "apt-get update && apt-get install -y \
+        linux-image-amd64 systemd-sysv grub-efi sudo network-manager xorg \
+        openbox xfce4 lightdm gnome-terminal \
+        metasploit john hashcat nmap wireshark snort suricata docker.io \
+        calamares"
+
+    # Copy Secure OS scripts and configuration
+    sudo cp -r ./secure_os "$CHROOT_DIR/usr/local/bin/secure_os"
+    sudo chmod +x "$CHROOT_DIR/usr/local/bin/secure_os/secure_os.py"
+
+    # Configure autologin for live session
+    echo "[Seat:*]" | sudo tee -a "$CHROOT_DIR/etc/lightdm/lightdm.conf"
+    echo "autologin-user=secureos" | sudo tee -a "$CHROOT_DIR/etc/lightdm/lightdm.conf"
+
+    # Create live user
+    sudo chroot "$CHROOT_DIR" /bin/bash -c "useradd -m secureos && echo 'secureos:secureos' | chpasswd && adduser secureos sudo"
+
+    # Unmount system directories
+    sudo umount -lf "$CHROOT_DIR/dev"
+    sudo umount -lf "$CHROOT_DIR/proc"
+    sudo umount -lf "$CHROOT_DIR/sys"
+}
+
+# Create the squashfs filesystem
+function create_squashfs() {
+    echo "Creating squashfs..."
+    sudo mksquashfs "$CHROOT_DIR" "$LIVE_DIR/filesystem.squashfs" -comp xz -e boot
+}
+
+# Create the bootloader configuration
+function configure_bootloader() {
+    echo "Configuring bootloader..."
+
+    # Copy kernel and initramfs
+    sudo cp "$CHROOT_DIR/boot/vmlinuz" "$LIVE_DIR/vmlinuz"
+    sudo cp "$CHROOT_DIR/boot/initrd.img" "$LIVE_DIR/initrd.img"
+
+    # Create grub configuration
+    mkdir -p "$LIVE_DIR/boot/grub"
+    cat > "$LIVE_DIR/boot/grub/grub.cfg" <<EOF
+set timeout=5
+set default=0
+
+menuentry "Secure OS (Live)" {
+    linux /vmlinuz boot=live quiet splash
+    initrd /initrd.img
+}
+
+menuentry "Install Secure OS" {
+    linux /vmlinuz boot=install quiet splash
+    initrd /initrd.img
+}
+EOF
+}
+
+# Build the ISO
+function build_iso() {
+    echo "Building ISO..."
+    grub-mkrescue -o "$ISO_OUTPUT" "$LIVE_DIR"
+    echo "ISO created: $ISO_OUTPUT"
+}
+
+# Main script execution
+install_dependencies
+prepare_environment
+bootstrap_debian
+configure_chroot
+create_squashfs
+configure_bootloader
+build_iso
